@@ -68,7 +68,6 @@ const STYLES = `
     background: #1e1e2e;
   }
 
-  /* Camera */
   .cam-box {
     position: relative;
     width: 100%;
@@ -197,7 +196,6 @@ const STYLES = `
 
   input:focus { border-color: #f0e040; }
 
-  /* Status */
   .status {
     margin-top: 12px;
     padding: 10px 14px;
@@ -213,7 +211,6 @@ const STYLES = `
 
   @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
-  /* Book preview */
   .book-preview {
     display: flex;
     gap: 16px;
@@ -262,7 +259,6 @@ const STYLES = `
   .meta-key { color: #40e0b0; }
   .meta-val { color: #94a3b8; }
 
-  /* Table */
   .table-scroll { overflow-x: auto; }
 
   table { width: 100%; border-collapse: collapse; font-size: 0.74rem; }
@@ -334,7 +330,36 @@ const STYLES = `
   }
 
   @keyframes flash { from { opacity: 1; } to { opacity: 0; } }
+
+  .zxing-loading {
+    width: 100%;
+    max-width: 420px;
+    margin: 0 auto 14px;
+    aspect-ratio: 4/3;
+    background: #0d0d14;
+    border: 2px solid #1e1e2e;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: #40e0b0;
+    font-size: 0.8rem;
+  }
 `;
+
+// Dynamically load ZXing from CDN
+function loadZxing() {
+  return new Promise((resolve, reject) => {
+    if (window.ZXing) { resolve(window.ZXing); return; }
+    const script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js";
+    script.onload = () => resolve(window.ZXing);
+    script.onerror = () => reject(new Error("Failed to load ZXing"));
+    document.head.appendChild(script);
+  });
+}
 
 export default function BookScanner() {
   const [books, setBooks] = useState(() => {
@@ -346,60 +371,82 @@ export default function BookScanner() {
   const [preview, setPreview] = useState(null);
   const [isbnInput, setIsbnInput] = useState("");
   const [flash, setFlash] = useState(false);
+  const [zxingReady, setZxingReady] = useState(false);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
-  const canvasRef = useRef(null);
-  const animRef = useRef(null);
+  const readerRef = useRef(null);
   const lastScannedRef = useRef("");
 
-  // Save books
   useEffect(() => {
     try { localStorage.setItem("isbn_books", JSON.stringify(books)); } catch {}
   }, [books]);
 
   const showStatus = (msg, type = "info") => setStatus({ msg, type });
 
-  // ── Camera scanner using BarcodeDetector API ──
+  // ── Start Camera using ZXing (works on all browsers/devices) ──
   const startCamera = async () => {
     setStatus(null);
+    showStatus("⏳ Loading scanner library...", "info");
+
+    let ZXing;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
+      ZXing = await loadZxing();
+      setZxingReady(true);
+    } catch (e) {
+      showStatus("Failed to load scanner. Check your internet connection.", "error");
+      return;
+    }
+
+    // Request camera permission first
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }
       });
       streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-      setScanning(true);
-      showStatus("📷 Point camera at the barcode/QR code on the book...", "info");
-      startDetection();
     } catch (e) {
-      showStatus(`Camera error: ${e.message}. Use manual ISBN entry below.`, "error");
+      if (e.name === "NotAllowedError") {
+        showStatus("Camera permission denied. Please allow camera access and try again.", "error");
+      } else if (e.name === "NotFoundError") {
+        showStatus("No camera found on this device. Use manual ISBN entry below.", "error");
+      } else {
+        showStatus(`Camera error: ${e.message}. Use manual ISBN entry below.`, "error");
+      }
+      return;
     }
-  };
 
-  const stopCamera = () => {
-    if (animRef.current) cancelAnimationFrame(animRef.current);
-    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-    setScanning(false);
-  };
+    setScanning(true);
+    showStatus("📷 Point camera at the barcode on the book...", "info");
 
-  const startDetection = () => {
-    const hasBD = "BarcodeDetector" in window;
-    if (hasBD) {
-      const detector = new window.BarcodeDetector({ formats: ["ean_13", "ean_8", "qr_code", "upc_a", "upc_e", "code_128"] });
-      const detect = async () => {
-        if (!videoRef.current || videoRef.current.readyState < 2) {
-          animRef.current = requestAnimationFrame(detect); return;
-        }
-        try {
-          const barcodes = await detector.detect(videoRef.current);
-          if (barcodes.length > 0) {
-            const code = barcodes[0].rawValue;
-            if (code !== lastScannedRef.current) {
+    // Wait for video element to mount, then attach stream
+    setTimeout(() => {
+      if (!videoRef.current) return;
+      videoRef.current.srcObject = stream;
+      videoRef.current.setAttribute("playsinline", true);
+      videoRef.current.muted = true;
+      videoRef.current.play().catch(() => {});
+
+      try {
+        const hints = new Map();
+        const formats = [
+          ZXing.BarcodeFormat.EAN_13,
+          ZXing.BarcodeFormat.EAN_8,
+          ZXing.BarcodeFormat.UPC_A,
+          ZXing.BarcodeFormat.UPC_E,
+          ZXing.BarcodeFormat.CODE_128,
+          ZXing.BarcodeFormat.QR_CODE,
+        ];
+        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+        const reader = new ZXing.BrowserMultiFormatReader(hints);
+        readerRef.current = reader;
+
+        reader.decodeFromStream(stream, videoRef.current, (result, err) => {
+          if (result) {
+            const code = result.getText();
+            if (code && code !== lastScannedRef.current) {
               lastScannedRef.current = code;
               setFlash(true);
               setTimeout(() => setFlash(false), 400);
@@ -407,15 +454,26 @@ export default function BookScanner() {
               fetchBook(code);
             }
           }
-        } catch {}
-        animRef.current = requestAnimationFrame(detect);
-      };
-      animRef.current = requestAnimationFrame(detect);
-    } else {
-      // Fallback: ZXing via canvas + manual
-      showStatus("📷 Camera active. BarcodeDetector not available in this browser — type ISBN manually or try Chrome.", "info");
-    }
+          // Ignore decode errors — they fire constantly when no barcode visible
+        });
+      } catch (e) {
+        showStatus("Scanner init failed: " + e.message, "error");
+      }
+    }, 150); // Small delay to let React render the video element
   };
+
+  const stopCamera = useCallback(() => {
+    if (readerRef.current) {
+      try { readerRef.current.reset(); } catch {}
+      readerRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    setScanning(false);
+    setZxingReady(false);
+  }, []);
 
   // ── Google Books fetch ──
   const fetchBook = useCallback(async (rawIsbn) => {
@@ -423,7 +481,7 @@ export default function BookScanner() {
     if (isbn.length < 8) { showStatus("ISBN too short. Check the number.", "error"); return; }
 
     setLoading(true);
-    showStatus(<><span className="spinner"/> Searching Google Books for: {isbn}</>, "info");
+    showStatus("Searching Google Books for: " + isbn, "info");
 
     try {
       const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1`);
@@ -509,8 +567,7 @@ export default function BookScanner() {
     });
   };
 
-  // Cleanup on unmount
-  useEffect(() => () => stopCamera(), []);
+  useEffect(() => () => stopCamera(), [stopCamera]);
 
   return (
     <>
@@ -520,7 +577,7 @@ export default function BookScanner() {
 
           <div className="header">
             <h1>📚 Book ISBN Scanner</h1>
-            <p>SCAN BARCODE / QR · GOOGLE BOOKS · EXPORT TO EXCEL OR SHEETS</p>
+            <p>SCAN BARCODE · GOOGLE BOOKS · EXPORT TO EXCEL OR SHEETS</p>
           </div>
 
           {/* Scanner Card */}
@@ -529,7 +586,12 @@ export default function BookScanner() {
 
             {scanning ? (
               <div className="cam-box" style={{ maxWidth: 420, margin: "0 auto 14px" }}>
-                <video ref={videoRef} playsInline muted style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                <video
+                  ref={videoRef}
+                  playsInline
+                  muted
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                />
                 <div className="scan-overlay">
                   <div className="scan-frame" />
                 </div>
@@ -650,7 +712,7 @@ export default function BookScanner() {
           <div className="card">
             <div className="card-label">How it works</div>
             <div style={{ fontSize: "0.78rem", lineHeight: 2, color: "#64748b" }}>
-              <span style={{ color: "#f0e040" }}>Camera Scan</span> — Uses your device camera + BarcodeDetector API (Chrome/Edge). Point at the barcode on the back of the book.<br />
+              <span style={{ color: "#f0e040" }}>Camera Scan</span> — Works on Chrome, Firefox, Safari, iOS and Android. Point at the barcode on the back of the book.<br />
               <span style={{ color: "#f0e040" }}>Manual Search</span> — Type any ISBN-10 or ISBN-13 and press Enter or Search.<br />
               <span style={{ color: "#f0e040" }}>Download CSV</span> — Opens directly in Excel. Or use Google Sheets → File → Import → Upload.<br />
               <span style={{ color: "#f0e040" }}>Google Sheets button</span> — Opens a new sheet + copies data to clipboard → paste in cell A1.<br />
