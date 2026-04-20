@@ -1,5 +1,47 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 
+// ─── YOUR RAILWAY BACKEND URL ──────────────────────────────────────────────
+// After you deploy to Railway, paste your URL here.
+// It looks like: https://isbn-backend-production-xxxx.up.railway.app
+const BACKEND = "https://web-production-bca9f.up.railway.app";
+
+// ─── Download Excel from Railway (includes Amazon + Flipkart) ──────────────
+async function downloadBulkExcel(books, showStatus) {
+    const isbns = books.map(b => b.isbn);
+
+    showStatus(`⏳ Sending ${isbns.length} ISBN(s) to server — fetching Amazon + Flipkart data…`, "info");
+
+    let response;
+    try {
+        response = await fetch(`${BACKEND}/bulk-excel`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ isbns }),
+        });
+    } catch (err) {
+        showStatus("❌ Could not reach the server. Check your Railway URL in BACKEND constant.", "error");
+        return false;
+    }
+
+    if (!response.ok) {
+        showStatus(`❌ Server error: ${response.status}. Try again in a moment.`, "error");
+        return false;
+    }
+
+    // Download the Excel file the server sends back
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "books_all_sources.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    showStatus(`✅ Downloaded books_all_sources.xlsx — includes Google Books, OpenLibrary, Amazon & Flipkart data!`, "success");
+    return true;
+}
 // %%% Styles %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 const STYLES = `
     @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Inconsolata:wght@400;500;600&display=swap');
@@ -516,11 +558,20 @@ export default function BookScanner() {
     const removeBook = (isbn) => setBooks(prev => prev.filter(b => b.isbn !== isbn));
 
     const handleExport = async () => {
-        if (!books.length) { showStatus("No books to export.", "error"); return; }
-        setExporting(true);
+    if (!books.length) { showStatus("No books to export.", "error"); return; }
+    setExporting(true);
+
+    // Try the Railway backend first (gives Amazon + Flipkart data)
+    const backendSuccess = await downloadBulkExcel(books, showStatus);
+
+    // If backend failed or not set up yet, fall back to the original browser export
+    if (!backendSuccess) {
+        showStatus("⚠️ Falling back to browser-only export (no Amazon/Flipkart prices)…", "info");
         await doExport(books, showStatus);
-        setExporting(false);
-    };
+    }
+
+    setExporting(false);
+};
 
     const openSheets = () => {
         if (!books.length) { showStatus("No books to export.", "error"); return; }
