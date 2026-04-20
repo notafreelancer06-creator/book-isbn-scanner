@@ -219,23 +219,35 @@ const v = (val) => (val !== undefined && val !== null && val !== "") ? String(va
 
 async function fetchGoogleBooks(isbn) {
     try {
-        const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1`);
+        const url = `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1`;
+        let res = await fetch(url);
+        
+        // If rate limited, wait 2 seconds and try once more
+        if (res.status === 429) {
+            await new Promise(r => setTimeout(r, 2000));
+            res = await fetch(url);
+        }
+        
+        if (!res.ok) return null;
         const data = await res.json();
-        if (!data.items?.length) return null;
-        const vi = data.items[0].volumeInfo;
+        if (!data.totalItems) return null;
+        
+        const v = data.items[0].volumeInfo;
         return {
-            title: v(vi.title),
-            subtitle: vi.subtitle || "",
-            authors: v((vi.authors || []).join(", ")),
-            publisher: v(vi.publisher),
-            year: v(vi.publishedDate?.slice(0, 4)),
-            pages: v(vi.pageCount),
-            language: v(vi.language),
-            categories: v((vi.categories || []).join(", ")),
-            description: (vi.description || "").slice(0, 200),
-            thumbnail: vi.imageLinks?.thumbnail?.replace("http://", "https://") || "",
+            title:       v.title || "",
+            subtitle:    v.subtitle || "",
+            authors:     (v.authors || []).join(", "),
+            publisher:   v.publisher || "",
+            year:        (v.publishedDate || "").slice(0, 4),
+            pages:       v.pageCount || "",
+            language:    v.language || "",
+            categories:  (v.categories || []).join(", "),
+            description: (v.description || "").slice(0, 400),
+            thumbnail:   v.imageLinks?.thumbnail || v.imageLinks?.smallThumbnail || "",
         };
-    } catch { return null; }
+    } catch {
+        return null;
+    }
 }
 
 async function fetchOpenLibrary(isbn) {
